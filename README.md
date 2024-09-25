@@ -49,11 +49,7 @@ To setup and deploy the Overwatch-SES project, follow these steps:
    ```bash
    cdk bootstrap
    ```
-6. **Build the Project**
-    ```bash
-    pnpm run build
-    ```
-7. **Deploy the Stack**
+6. **Deploy the Stack**
    ```bash
    cd cdk; cdk deploy OverWatchSES
    ```
