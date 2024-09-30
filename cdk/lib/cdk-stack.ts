@@ -4,81 +4,122 @@ import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { Rule } from 'aws-cdk-lib/aws-events';
 import { CloudWatchLogGroup } from 'aws-cdk-lib/aws-events-targets';
 import { Metric, Alarm, ComparisonOperator, Unit } from 'aws-cdk-lib/aws-cloudwatch';
+import { Role, ServicePrincipal, PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import * as ses from 'aws-cdk-lib/aws-ses';
 
 export class OverWatchSES extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    // Create Log Group for SES Events
     const logGroup = new LogGroup(this, 'OverWatchSESLogGroup', {
       retention: RetentionDays.ONE_YEAR,
-      logGroupName: '/aws/overwatch/ses-logs'
+      logGroupName: '/aws/overwatch/ses-logs',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    const sesEventRule = new Rule(this, 'SESEventRule', {
-      eventPattern: {
-        source: ['aws.ses'],
-        detailType: [
-          'Email Bounced',
-          'Email Complaint Received',
-          'Email Delivery Delayed',
-          'Email Rejected',
-          'Email Rendering Failed'
+    logGroup.grantWrite(new ServicePrincipal('events.amazonaws.com'));
+
+    // Create an IAM Role that SES can assume to publish events to CloudWatch
+    const sesCloudWatchRole = new Role(this, 'SESCloudWatchRole', {
+      assumedBy: new ServicePrincipal('ses.amazonaws.com'),
+    });
+
+    // Grant permission for the role to put events to EventBridge
+    sesCloudWatchRole.addToPolicy(new PolicyStatement({
+      actions: ['events:PutEvents', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: ['*'],
+    }));
+
+    // Create SES Configuration Set
+    const configurationSet = new ses.CfnConfigurationSet(this, 'SESConfigurationSet', {
+      name: 'OverWatchConfigurationSet',
+    });
+
+    const eventDestination = new ses.CfnConfigurationSetEventDestination(this, 'SESConfigurationSetEventDestination', {
+      configurationSetName: configurationSet.name!,
+      eventDestination: {
+        matchingEventTypes: [
+          ses.EmailSendingEvent.SEND,
+          ses.EmailSendingEvent.REJECT,
+          ses.EmailSendingEvent.BOUNCE,
+          ses.EmailSendingEvent.COMPLAINT,
+          ses.EmailSendingEvent.RENDERING_FAILURE
         ],
+        eventBridgeDestination: {
+           eventBusArn: `arn:aws:events:${this.region}:${this.account}:event-bus/default`,
+        },
+        enabled: true
       },
     });
 
-    sesEventRule.addTarget(new CloudWatchLogGroup(logGroup));
+    eventDestination.node.addDependency(configurationSet);
 
-    const bounceRateMetric = new Metric({
-      namespace: 'AWS/SES',
-      metricName: 'Reputation.BounceRate',
-      statistic: 'Average',
-      period: cdk.Duration.minutes(5),
-      unit: Unit.PERCENT,
+    // Create EventBridge Rule to capture SNS notifications and forward to CloudWatch Logs
+    const eventRule = new Rule(this, 'OverwatchEventRule', {
+      eventPattern: {
+        source: ['aws.ses'],
+        detailType: ['Email Sent', 'Email Bounced', 'Email Complaint Received', 'Email Rejected', 'Email Rendering Failed'],
+      },
     });
 
-    const complaintRateMetric = new Metric({
-      namespace: 'AWS/SES',
-      metricName: 'Reputation.ComplaintRate',
-      statistic: 'Average', // Using string for statistic as required
-      period: cdk.Duration.minutes(5),
-      unit: Unit.PERCENT,
-    });
+    // Add CloudWatch Log Group as the target of the EventBridge Rule
+    eventRule.addTarget(new CloudWatchLogGroup(logGroup));
 
-    const sendingRateMetric = new Metric({
-      namespace: 'AWS/SES',
-      metricName: 'MaxSendRate',
-      statistic: 'Maximum',
-      period: cdk.Duration.minutes(5),
-      unit: Unit.COUNT,
-    });
+    // Ensure dependencies
+    eventRule.node.addDependency(logGroup, eventDestination);
 
-    new Alarm(this, 'SES - HighBounceRateAlarm', {
-      metric: bounceRateMetric,
-      threshold: 4,
-      evaluationPeriods: 1,
-      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      alarmDescription: 'Alarm when SES reputation bounce rate is too high',
-      treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-
-    new Alarm(this, 'SES - HighComplaintRateAlarm', {
-      metric: complaintRateMetric,
-      threshold: 0.09,
-      evaluationPeriods: 1,
-      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      alarmDescription: 'Alarm when SES reputation complaint rate is too high',
-      treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
-
-    new Alarm(this, 'SES - SendingQuotaUsageAlarm', {
-      metric: sendingRateMetric,
-      threshold: 0.8,
-      evaluationPeriods: 1,
-      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      alarmDescription: 'Alarm when SES sending rate reaches 80% of the quota',
-      treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
+    // // CloudWatch Metrics and Alarms
+    // const bounceRateMetric = new Metric({
+    //   namespace: 'AWS/SES',
+    //   metricName: 'Reputation.BounceRate',
+    //   statistic: 'Average',
+    //   period: cdk.Duration.minutes(5),
+    //   unit: Unit.PERCENT,
+    // });
+    //
+    // const complaintRateMetric = new Metric({
+    //   namespace: 'AWS/SES',
+    //   metricName: 'Reputation.ComplaintRate',
+    //   statistic: 'Average',
+    //   period: cdk.Duration.minutes(5),
+    //   unit: Unit.PERCENT,
+    // });
+    //
+    // const sendingRateMetric = new Metric({
+    //   namespace: 'AWS/SES',
+    //   metricName: 'MaxSendRate',
+    //   statistic: 'Maximum',
+    //   period: cdk.Duration.minutes(5),
+    //   unit: Unit.COUNT,
+    // });
+    //
+    // new Alarm(this, 'SES - HighBounceRateAlarm', {
+    //   metric: bounceRateMetric,
+    //   threshold: 4,
+    //   evaluationPeriods: 1,
+    //   comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    //   alarmDescription: 'Alarm when SES reputation bounce rate is too high',
+    //   treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
+    // });
+    //
+    // new Alarm(this, 'SES - HighComplaintRateAlarm', {
+    //   metric: complaintRateMetric,
+    //   threshold: 0.09,
+    //   evaluationPeriods: 1,
+    //   comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    //   alarmDescription: 'Alarm when SES reputation complaint rate is too high',
+    //   treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
+    // });
+    //
+    // new Alarm(this, 'SES - SendingQuotaUsageAlarm', {
+    //   metric: sendingRateMetric,
+    //   threshold: 0.8,
+    //   evaluationPeriods: 1,
+    //   comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    //   alarmDescription: 'Alarm when SES sending rate reaches 80% of the quota',
+    //   treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
+    // });
   }
 }
 
