@@ -6,6 +6,7 @@ import { CloudWatchLogGroup } from 'aws-cdk-lib/aws-events-targets';
 import { Metric, Alarm, ComparisonOperator, Unit } from 'aws-cdk-lib/aws-cloudwatch';
 import { Role, ServicePrincipal, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import * as ses from 'aws-cdk-lib/aws-ses';
+import { CfnEmailIdentity } from "aws-cdk-lib/aws-ses";
 
 export class OverWatchSES extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -17,8 +18,6 @@ export class OverWatchSES extends cdk.Stack {
       logGroupName: '/aws/overwatch/ses-logs',
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
-
-    logGroup.grantWrite(new ServicePrincipal('events.amazonaws.com'));
 
     // Create an IAM Role that SES can assume to publish events to CloudWatch
     const sesCloudWatchRole = new Role(this, 'SESCloudWatchRole', {
@@ -35,6 +34,20 @@ export class OverWatchSES extends cdk.Stack {
     const configurationSet = new ses.CfnConfigurationSet(this, 'SESConfigurationSet', {
       name: 'OverWatchConfigurationSet',
     });
+
+    // Create an SES email identity and send the verification email
+    const emailAddressIdentity = 'lcelli@truemark.io';  // Replace with your verified email or domain
+
+    // Attach the configuration set to the email identity
+    const identity = new CfnEmailIdentity(this, 'SESEmailIdentity', {
+      emailIdentity: emailAddressIdentity,
+      configurationSetAttributes: {
+        configurationSetName: configurationSet.name!,
+      },
+    });
+
+    // Ensure the configuration set is created before it's attached to the email identity
+    identity.node.addDependency(configurationSet);
 
     const eventDestination = new ses.CfnConfigurationSetEventDestination(this, 'SESConfigurationSetEventDestination', {
       configurationSetName: configurationSet.name!,
@@ -53,6 +66,7 @@ export class OverWatchSES extends cdk.Stack {
       },
     });
 
+    // Ensure the configuration set is created before it's attached to the event destination
     eventDestination.node.addDependency(configurationSet);
 
     // Create EventBridge Rule to capture SNS notifications and forward to CloudWatch Logs
@@ -66,60 +80,60 @@ export class OverWatchSES extends cdk.Stack {
     // Add CloudWatch Log Group as the target of the EventBridge Rule
     eventRule.addTarget(new CloudWatchLogGroup(logGroup));
 
-    // Ensure dependencies
+    // Ensure the log group is created before it's added as a dependency
     eventRule.node.addDependency(logGroup, eventDestination);
 
-    // // CloudWatch Metrics and Alarms
-    // const bounceRateMetric = new Metric({
-    //   namespace: 'AWS/SES',
-    //   metricName: 'Reputation.BounceRate',
-    //   statistic: 'Average',
-    //   period: cdk.Duration.minutes(5),
-    //   unit: Unit.PERCENT,
-    // });
-    //
-    // const complaintRateMetric = new Metric({
-    //   namespace: 'AWS/SES',
-    //   metricName: 'Reputation.ComplaintRate',
-    //   statistic: 'Average',
-    //   period: cdk.Duration.minutes(5),
-    //   unit: Unit.PERCENT,
-    // });
-    //
-    // const sendingRateMetric = new Metric({
-    //   namespace: 'AWS/SES',
-    //   metricName: 'MaxSendRate',
-    //   statistic: 'Maximum',
-    //   period: cdk.Duration.minutes(5),
-    //   unit: Unit.COUNT,
-    // });
-    //
-    // new Alarm(this, 'SES - HighBounceRateAlarm', {
-    //   metric: bounceRateMetric,
-    //   threshold: 4,
-    //   evaluationPeriods: 1,
-    //   comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-    //   alarmDescription: 'Alarm when SES reputation bounce rate is too high',
-    //   treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
-    // });
-    //
-    // new Alarm(this, 'SES - HighComplaintRateAlarm', {
-    //   metric: complaintRateMetric,
-    //   threshold: 0.09,
-    //   evaluationPeriods: 1,
-    //   comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-    //   alarmDescription: 'Alarm when SES reputation complaint rate is too high',
-    //   treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
-    // });
-    //
-    // new Alarm(this, 'SES - SendingQuotaUsageAlarm', {
-    //   metric: sendingRateMetric,
-    //   threshold: 0.8,
-    //   evaluationPeriods: 1,
-    //   comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-    //   alarmDescription: 'Alarm when SES sending rate reaches 80% of the quota',
-    //   treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
-    // });
+    // CloudWatch Metrics and Alarms
+    const bounceRateMetric = new Metric({
+      namespace: 'AWS/SES',
+      metricName: 'Reputation.BounceRate',
+      statistic: 'Average',
+      period: cdk.Duration.minutes(60),
+      unit: Unit.PERCENT,
+    });
+
+    const complaintRateMetric = new Metric({
+      namespace: 'AWS/SES',
+      metricName: 'Reputation.ComplaintRate',
+      statistic: 'Average',
+      period: cdk.Duration.minutes(60),
+      unit: Unit.PERCENT,
+    });
+
+    const sendingRateMetric = new Metric({
+      namespace: 'AWS/SES',
+      metricName: 'MaxSendRate',
+      statistic: 'Maximum',
+      period: cdk.Duration.minutes(5),
+      unit: Unit.COUNT,
+    });
+
+    new Alarm(this, 'SES - HighBounceRateAlarm', {
+      metric: bounceRateMetric,
+      threshold: 4,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      alarmDescription: 'Alarm when SES reputation bounce rate is too high',
+      treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new Alarm(this, 'SES - HighComplaintRateAlarm', {
+      metric: complaintRateMetric,
+      threshold: 0.09,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      alarmDescription: 'Alarm when SES reputation complaint rate is too high',
+      treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new Alarm(this, 'SES - SendingQuotaUsageAlarm', {
+      metric: sendingRateMetric,
+      threshold: 0.8,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      alarmDescription: 'Alarm when SES sending rate reaches 80% of the quota',
+      treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
   }
 }
 
